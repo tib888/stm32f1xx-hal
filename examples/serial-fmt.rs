@@ -1,6 +1,7 @@
-//! Serial interface loopback test
+//! Serial interface write formatted strings test
 //!
-//! You have to short the TX and RX pins to make this program work
+//! You need to connect the Tx pin to the Rx pin of a serial-usb converter
+//! so you can see the message in a serial console (e.g. Arduino console).
 
 #![deny(unsafe_code)]
 #![no_main]
@@ -8,16 +9,14 @@
 
 use panic_halt as _;
 
-use cortex_m::asm;
-
-use nb::block;
-
 use stm32f1xx_hal::{
     prelude::*,
     pac,
     serial::{Config, Serial},
 };
 use cortex_m_rt::entry;
+
+use core::fmt::Write;
 
 #[entry]
 fn main() -> ! {
@@ -59,7 +58,7 @@ fn main() -> ! {
 
     // Set up the usart device. Taks ownership over the USART register and tx/rx pins. The rest of
     // the registers are used to enable and configure the device.
-    let mut serial = Serial::usart3(
+    let serial = Serial::usart3(
         p.USART3,
         (tx, rx),
         &mut afio.mapr,
@@ -68,29 +67,14 @@ fn main() -> ! {
         &mut rcc.apb1,
     );
 
+    // Split the serial struct into a receiving and a transmitting part
+    let (mut tx, _rx) = serial.split();
 
-    // Loopback test. Write `X` and wait until the write is successful.
-    let sent = b'X';
-    block!(serial.write(sent)).ok();
+    let number = 103;
+    writeln!(tx, "Hello formatted string {}", number).unwrap();
 
-    // Read the byte that was just sent. Blocks until the read is complete
-    let received = block!(serial.read()).unwrap();
-
-    // Since we have connected tx and rx, the byte we sent should be the one we received
-    assert_eq!(received, sent);
-
-    // Trigger a breakpoint to allow us to inspect the values
-    asm::bkpt();
-
-
-    // You can also split the serial struct into a receiving and a transmitting part
-    let (mut tx, mut rx) = serial.split();
-    let sent = b'Y';
-    block!(tx.write(sent)).ok();
-    let received = block!(rx.read()).unwrap();
-    assert_eq!(received, sent);
-    asm::bkpt();
-
+    // for windows
+    // write!(tx, "Hello formatted string {}\r\n", number).unwrap();
 
     loop {}
 }

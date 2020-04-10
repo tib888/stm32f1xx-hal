@@ -1,9 +1,10 @@
 //! # Serial Communication (USART)
+//!
 //! This module contains the functions to utilize the USART (Universal
 //! synchronous asynchronous receiver transmitter)
 //!
-//!
 //! ## Example usage:
+//!
 //!  ```rust
 //! // prelude: create handles to the peripherals and registers
 //! let p = crate::pac::Peripherals::take().unwrap();
@@ -39,17 +40,21 @@
 use core::marker::PhantomData;
 use core::ptr;
 use core::sync::atomic::{self, Ordering};
+use core::ops::Deref;
 
 use nb;
 use crate::pac::{USART1, USART2, USART3};
-use void::Void;
+use core::convert::Infallible;
+use embedded_hal::serial::Write;
 
 use crate::afio::MAPR;
 use crate::dma::{dma1, CircBuffer, Static, Transfer, R, W, RxDma, TxDma};
 use crate::gpio::gpioa::{PA10, PA2, PA3, PA9};
 use crate::gpio::gpiob::{PB10, PB11, PB6, PB7};
+use crate::gpio::gpioc::{PC10, PC11};
+use crate::gpio::gpiod::{PD5, PD6, PD8, PD9};
 use crate::gpio::{Alternate, Floating, Input, PushPull};
-use crate::rcc::{RccBus, Clocks, Enable, Reset};
+use crate::rcc::{sealed::RccBus, Clocks, Enable, Reset, GetBusFreq};
 use crate::time::{U32Ext, Bps};
 
 /// Interrupt event
@@ -75,6 +80,9 @@ pub enum Error {
     _Extensible,
 }
 
+
+// USART REMAPPING, see: https://www.st.com/content/ccc/resource/technical/document/reference_manual/59/b9/ba/7f/11/af/43/d5/CD00171190.pdf/files/CD00171190.pdf/jcr:content/translations/en.CD00171190.pdf
+// Section 9.3.8
 pub trait Pins<USART> {
     const REMAP: u8;
 }
@@ -91,21 +99,21 @@ impl Pins<USART2> for (PA2<Alternate<PushPull>>, PA3<Input<Floating>>) {
     const REMAP: u8 = 0;
 }
 
-// impl Pins<USART2> for (PD5<Alternate<PushPull>>, PD6<Input<Floating>>) {
-//     const REMAP: u8 = 0;
-// }
+impl Pins<USART2> for (PD5<Alternate<PushPull>>, PD6<Input<Floating>>) {
+    const REMAP: u8 = 0;
+}
 
 impl Pins<USART3> for (PB10<Alternate<PushPull>>, PB11<Input<Floating>>) {
     const REMAP: u8 = 0;
 }
 
-// impl Pins<USART3> for (PC10<Alternate<PushPull>>, PC11<Input<Floating>>) {
-//     const REMAP: u8 = 1;
-// }
+impl Pins<USART3> for (PC10<Alternate<PushPull>>, PC11<Input<Floating>>) {
+    const REMAP: u8 = 1;
+}
 
-// impl Pins<USART3> for (PD8<Alternate<PushPull>>, PD9<Input<Floating>>) {
-//     const REMAP: u8 = 0b11;
-// }
+impl Pins<USART3> for (PD8<Alternate<PushPull>>, PD9<Input<Floating>>) {
+    const REMAP: u8 = 0b11;
+}
 
 pub enum Parity {
     ParityNone,
@@ -184,13 +192,81 @@ pub struct Tx<USART> {
     _usart: PhantomData<USART>,
 }
 
+/// Internal trait for the serial read / write logic.
+trait UsartReadWrite: Deref<Target=crate::pac::usart1::RegisterBlock> {
+    fn read(&self) -> nb::Result<u8, Error> {
+        let sr = self.sr.read();
+
+        // Check for any errors
+        let err = if sr.pe().bit_is_set() {
+            Some(Error::Parity)
+        } else if sr.fe().bit_is_set() {
+            Some(Error::Framing)
+        } else if sr.ne().bit_is_set() {
+            Some(Error::Noise)
+        } else if sr.ore().bit_is_set() {
+            Some(Error::Overrun)
+        } else {
+            None
+        };
+
+        if let Some(err) = err {
+            // Some error occurred. In order to clear that error flag, you have to
+            // do a read from the sr register followed by a read from the dr
+            // register
+            // NOTE(read_volatile) see `write_volatile` below
+            unsafe {
+                ptr::read_volatile(&self.sr as *const _ as *const _);
+                ptr::read_volatile(&self.dr as *const _ as *const _);
+            }
+            Err(nb::Error::Other(err))
+        } else {
+            // Check if a byte is available
+            if sr.rxne().bit_is_set() {
+                // Read the received byte
+                // NOTE(read_volatile) see `write_volatile` below
+                Ok(unsafe {
+                    ptr::read_volatile(&self.dr as *const _ as *const _)
+                })
+            } else {
+                Err(nb::Error::WouldBlock)
+            }
+        }
+    }
+
+    fn write(&self, byte: u8) -> nb::Result<(), Infallible> {
+        let sr = self.sr.read();
+
+        if sr.txe().bit_is_set() {
+            // NOTE(unsafe) atomic write to stateless register
+            // NOTE(write_volatile) 8-bit write that's not possible through the svd2rust API
+            unsafe {
+                ptr::write_volatile(&self.dr as *const _ as *mut _, byte)
+            }
+            Ok(())
+        } else {
+            Err(nb::Error::WouldBlock)
+        }
+    }
+
+    fn flush(&self) -> nb::Result<(), Infallible> {
+        let sr = self.sr.read();
+
+        if sr.tc().bit_is_set() {
+            Ok(())
+        } else {
+            Err(nb::Error::WouldBlock)
+        }
+    }
+}
+impl UsartReadWrite for &crate::pac::usart1::RegisterBlock {}
+
 macro_rules! hal {
     ($(
         $(#[$meta:meta])*
         $USARTX:ident: (
             $usartX:ident,
             $usartX_remap:ident,
-            $pclk:ident,
             $bit:ident,
             $closure:expr,
         ),
@@ -240,7 +316,7 @@ macro_rules! hal {
                     usart.cr3.write(|w| w.dmat().set_bit().dmar().set_bit());
 
                     // Configure baud rate
-                    let brr = clocks.$pclk().0 / config.baudrate.0;
+                    let brr = <$USARTX as RccBus>::Bus::get_frequency(&clocks).0 / config.baudrate.0;
                     assert!(brr >= 16, "impossible baud rate");
                     usart.brr.write(|w| unsafe { w.bits(brr) });
 
@@ -345,78 +421,54 @@ macro_rules! hal {
                 type Error = Error;
 
                 fn read(&mut self) -> nb::Result<u8, Error> {
-                    // NOTE(unsafe) atomic read with no side effects
-                    let sr = unsafe { (*$USARTX::ptr()).sr.read() };
-
-                    // Check for any errors
-                    let err = if sr.pe().bit_is_set() {
-                        Some(Error::Parity)
-                    } else if sr.fe().bit_is_set() {
-                        Some(Error::Framing)
-                    } else if sr.ne().bit_is_set() {
-                        Some(Error::Noise)
-                    } else if sr.ore().bit_is_set() {
-                        Some(Error::Overrun)
-                    } else {
-                        None
-                    };
-
-                    if let Some(err) = err {
-                        // Some error occured. In order to clear that error flag, you have to
-                        // do a read from the sr register followed by a read from the dr
-                        // register
-                        // NOTE(read_volatile) see `write_volatile` below
-                        unsafe {
-                            ptr::read_volatile(&(*$USARTX::ptr()).sr as *const _ as *const _);
-                            ptr::read_volatile(&(*$USARTX::ptr()).dr as *const _ as *const _);
-                        }
-                        Err(nb::Error::Other(err))
-                    } else {
-                        // Check if a byte is available
-                        if sr.rxne().bit_is_set() {
-                            // Read the received byte
-                            // NOTE(read_volatile) see `write_volatile` below
-                            Ok(unsafe {
-                                ptr::read_volatile(&(*$USARTX::ptr()).dr as *const _ as *const _)
-                            })
-                        } else {
-                            Err(nb::Error::WouldBlock)
-                        }
-                    }
+                    unsafe { &*$USARTX::ptr() }.read()
                 }
             }
 
             impl crate::hal::serial::Write<u8> for Tx<$USARTX> {
-                type Error = Void;
+                type Error = Infallible;
 
                 fn flush(&mut self) -> nb::Result<(), Self::Error> {
-                    // NOTE(unsafe) atomic read with no side effects
-                    let sr = unsafe { (*$USARTX::ptr()).sr.read() };
+                    unsafe { &*$USARTX::ptr() }.flush()
+                }
+                fn write(&mut self, byte: u8) -> nb::Result<(), Self::Error> {
+                    unsafe { &*$USARTX::ptr() }.write(byte)
+                }
+            }
 
-                    if sr.tc().bit_is_set() {
-                        Ok(())
-                    } else {
-                        Err(nb::Error::WouldBlock)
-                    }
+            impl<PINS> crate::hal::serial::Read<u8> for Serial<$USARTX, PINS> {
+                type Error = Error;
+
+                fn read(&mut self) -> nb::Result<u8, Error> {
+                    self.usart.deref().read()
+                }
+            }
+
+            impl<PINS> crate::hal::serial::Write<u8> for Serial<$USARTX, PINS> {
+                type Error = Infallible;
+
+                fn flush(&mut self) -> nb::Result<(), Self::Error> {
+                    self.usart.deref().flush()
                 }
 
                 fn write(&mut self, byte: u8) -> nb::Result<(), Self::Error> {
-                    // NOTE(unsafe) atomic read with no side effects
-                    let sr = unsafe { (*$USARTX::ptr()).sr.read() };
-
-                    if sr.txe().bit_is_set() {
-                        // NOTE(unsafe) atomic write to stateless register
-                        // NOTE(write_volatile) 8-bit write that's not possible through the svd2rust API
-                        unsafe {
-                            ptr::write_volatile(&(*$USARTX::ptr()).dr as *const _ as *mut _, byte)
-                        }
-                        Ok(())
-                    } else {
-                        Err(nb::Error::WouldBlock)
-                    }
+                    self.usart.deref().write(byte)
                 }
             }
+
         )+
+    }
+}
+
+impl<USART> core::fmt::Write for Tx<USART>
+where
+    Tx<USART>: embedded_hal::serial::Write<u8>,
+{
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        s.as_bytes()
+            .iter()
+            .try_for_each(|c| nb::block!(self.write(*c)))
+            .map_err(|_| core::fmt::Error)
     }
 }
 
@@ -425,7 +477,6 @@ hal! {
     USART1: (
         usart1,
         usart1_remap,
-        pclk2,
         bit,
         |remap| remap == 1,
     ),
@@ -433,7 +484,6 @@ hal! {
     USART2: (
         usart2,
         usart2_remap,
-        pclk1,
         bit,
         |remap| remap == 1,
     ),
@@ -441,7 +491,6 @@ hal! {
     USART3: (
         usart3,
         usart3_remap,
-        pclk1,
         bits,
         |remap| remap,
     ),

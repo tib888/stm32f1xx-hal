@@ -7,27 +7,89 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Breaking changes
+
+- Bump `stm32f1` dependency (`0.10.0`)
+- Make traits `rcc::Enable` and `rcc::Reset` public, but `RccBus` sealed
+
 ### Added
 
+- Extend the Pwm implementation to cover the full embedded_hal::Pwm API
+- Add `QeiOptions` struct to configure slave mode and auto reload value of QEI interface
+- Implement multiplication and division for frequency wrappers (#193)
+
+### Changed
+
+- Consistently use PAC as `pac` and mark `device` and `stm32` informally as deprecated
+- Replace default blocking spi Write implementation with an optimized one
+- Use `Deref` for SPI generic implementations instead of macros
+
+### Fixed
+
+- Fix PWM on `TIM1`
+
+## [v0.5.3] - 2020-01-20
+
+- Add `InputPin` impl for generic open drain outputs
+- Implement `Read<u8>` / `Write<u8>` for `Serial` (#171)
+- Fix docs.rs build
+
+## [v0.5.2] - 2019-12-15
+
+- Fix USB module docs
+
+## [v0.5.1] - 2019-12-14
+
+### Added
+
+- Added support for `ExtiPin` pin traits
+
+### Fixed
+
+- Fix SPI2 and 3 using the wrong frequency
+- Fix some problems with I2C reads anad writes
+
+
+## [v0.5.0] - 2019-12-03
+
+### Added
+
+- Added `Mode` marker trait for `gpio` pins that correspondent to pin mode.
 - RCC `Bus` trait + private `Enable` and `Reset` traits
 - Added `micros_since` and `reset` methods to timer
 - Added `select_frequency` method to RTC
+- Unidirectional DMA support for SPI (TX only)
+- Added USB driver for `stm32f102` and `stm32f103` devices
+- Added all timers for all variants as described by CubeMX. Commented out {TIM9, TIM10} for XL and {TIM12, TIM13, TIM14} for XL and F100-HIGH due to missing fields for those devices in stm32-rs.
+- ADC measurement now can be run by timer
 
 ### Breaking changes
 
+- Implement more pin combinations for PWM configuration, added PWM for TIM1 (API for custom PWM pins was removed as it's no more needed)
+- Bump `stm32f1` dependency (`0.9.0`)
+- `void::Void` replaced with `Infallible` where it is possible
 - Change timer/pwm init API
 - Remove `set_low` and `set_high` for pins in Alternate output mode
 - Renames `set_seconds` and `seconds` methods on RTC to `set_time` and `current_time`, respectively
 - Starting the timer does not generate interrupt requests anymore
 - Make MAPR::mapr() private
+- i2c mode now takes Hertz instead of a generic u32
+- Timers that were previously incorrectly available without medium/high/xl density features may now be missing
 
 ### Fixed
 
 - Fix some F1 variants crashing when modifying MAPR if JTAG is disabled
+- Switched Timer stop_in_debug to modify cr instead of writing it to prevent it clobbering the rest of the register (was breaking ITM output when configuring pwm_input for example)
 
 ### Changed
 
+- Pins can be passed in any order to SPI constructor,
+  `NoSck`, `NoMiso` and `NoMosi` can be also passed instead of real pin
 - DMA traits now require AsSlice instead of AsRef
+- GPIO `downgrade` function now returns a `Pxx` instead of a type specific to a
+  GPIO port
+
+- AdcDma can process several pins at a time
 
 ## [v0.4.0] - 2019-08-09
 
@@ -48,7 +110,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Replace gpio traits with digital::v2
 - Bump `stm32f1` dependency (`0.8.0`)
 - ADC now requires the clock configuration for initialisation
-- `disable_jtag` now transforms PA15, PB3 and PB4 to forbid their use without desactivating JTAG
+- `disable_jtag` now transforms PA15, PB3 and PB4 to forbid their use without deactivating JTAG
 
 ### Changed
 
@@ -69,7 +131,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Add methods `stop`, `release` and `clear_update_interrupt_flag` to `Timer` (`clear_update_interrupt_flag` does not apply to `Timer<SYST>`)
 - Add timer interrupt example using RTFM
 - Implement IndependentWatchdog for the IWDG peripheral
-- Remove all PWM channel configurations except 'all the channels for default remapping' configuratons
+- Remove all PWM channel configurations except 'all the channels for default remapping' configurations
 - Update PWM documentation: clarify custom selection of channels
 - Add PWM example for custom selection of channels
 
@@ -123,7 +185,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 - First tagged version
 
-[Unreleased]: https://github.com/stm32-rs/stm32f1xx-hal/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/stm32-rs/stm32f1xx-hal/compare/v0.5.3...HEAD
+[v0.5.3]: https://github.com/stm32-rs/stm32f1xx-hal/compare/v0.5.2...v0.5.3
+[v0.5.2]: https://github.com/stm32-rs/stm32f1xx-hal/compare/v0.5.1...v0.5.2
+[v0.5.1]: https://github.com/stm32-rs/stm32f1xx-hal/compare/v0.5.0...v0.5.1
+[v0.5.0]: https://github.com/stm32-rs/stm32f1xx-hal/compare/v0.4.0...v0.5.0
 [v0.4.0]: https://github.com/stm32-rs/stm32f1xx-hal/compare/v0.3.0...v0.4.0
 [v0.3.0]: https://github.com/stm32-rs/stm32f1xx-hal/compare/v0.2.1...v0.3.0
 [v0.2.1]: https://github.com/stm32-rs/stm32f1xx-hal/compare/v0.2.0...v0.2.1
